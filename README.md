@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 🧠 SmartRU AI — Microserviço de Inteligência Artificial
 
 > Microserviço de IA para otimização do Restaurante Universitário da UFRPE, integrado ao sistema [SmartRU](https://semdesperdicio.smartru.com.br).
@@ -306,3 +307,6 @@ httpx==0.27.0
 ---
 
 > Desenvolvido por estudantes de Sistemas de Informação da UFRPE como solução sustentável para o Restaurante Universitário.
+=======
+# DESPERDICIO-IA
+>>>>>>> a9d20b6b3a83ffac712de62ae6b32c18d06a8a1c
