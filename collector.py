@@ -1,9 +1,8 @@
 import pandas as pd
-from app.utils.db import get_connection
-from app.utils.logger import logger
+from db import get_connection
+from logger import logger
 
 def collect_schedules() -> pd.DataFrame:
-    """Coleta todos os agendamentos do banco do SmartRU."""
     query = """
         SELECT
             s.id,
@@ -28,7 +27,6 @@ def collect_schedules() -> pd.DataFrame:
         return pd.DataFrame()
 
 def collect_daily_demand() -> pd.DataFrame:
-    """Agrega demanda diária por turno."""
     query = """
         SELECT
             schedule_date,
