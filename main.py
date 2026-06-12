@@ -1,7 +1,10 @@
 from fastapi import FastAPI
-from app.api import demand, noshow, patterns, health
-from app.pipeline.scheduler import start_scheduler
-from app.utils.logger import logger
+import health
+import demand
+import noshow
+import patterns
+from scheduler import start_scheduler
+from logger import logger
 
 app = FastAPI(
     title="SmartRU AI",
