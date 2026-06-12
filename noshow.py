@@ -3,9 +3,8 @@ import joblib
 import pandas as pd
 from fastapi import APIRouter
 from pydantic import BaseModel
-from app.utils.config import MODEL_DIR
-from app.pipeline.collector import collect_schedules
-from app.pipeline.processor import process_noshow_features
+from config import MODEL_DIR
+from collector import collect_schedules
 
 router = APIRouter()
 
@@ -23,16 +22,13 @@ def _load_model():
 @router.post("/predict")
 def predict_noshow(req: NoshowRequest):
     model = _load_model()
-
     df = collect_schedules()
     user_data = df[df["user_cpf"] == req.user_cpf] if not df.empty else pd.DataFrame()
     user_noshow_rate = user_data["is_noshow"].mean() if not user_data.empty else 0.2
     user_noshow_count = user_data["is_noshow"].sum() if not user_data.empty else 0
-
     if model is None:
         risk = "high" if user_noshow_rate > 0.4 else "medium" if user_noshow_rate > 0.2 else "low"
         return {"noshow_probability": round(user_noshow_rate, 2), "risk": risk, "method": "historical_rate"}
-
     target_date = pd.to_datetime(req.schedule_date)
     row = {
         "day_of_week": target_date.dayofweek,
