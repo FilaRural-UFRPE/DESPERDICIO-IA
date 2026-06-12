@@ -1,14 +1,13 @@
 import os
 import joblib
 import pandas as pd
-import numpy as np
 from datetime import date, timedelta
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
-from app.utils.config import MODEL_DIR
-from app.utils.logger import logger
-from app.pipeline.collector import collect_daily_demand
-from app.pipeline.processor import process_demand_features
+from config import MODEL_DIR
+from logger import logger
+from collector import collect_daily_demand
+from processor import process_demand_features
 
 router = APIRouter()
 
@@ -26,17 +25,14 @@ def _load_model():
 def predict_demand(req: DemandRequest):
     model = _load_model()
     if model is None:
-        # Fallback: média histórica simples
         df = collect_daily_demand()
         if df.empty:
             return {"predicted_meals": 0, "confidence": 0.0, "method": "no_data"}
         avg = int(df[df["schedule_type"] == req.meal_type]["total_agendados"].mean())
         return {"predicted_meals": avg, "confidence": 0.5, "method": "historical_mean"}
-
     target_date = pd.to_datetime(req.date)
     df = collect_daily_demand()
     df = process_demand_features(df)
-
     row = {
         "day_of_week": target_date.dayofweek,
         "week_of_month": target_date.day // 7,
@@ -57,9 +53,5 @@ def forecast(days: int = 7):
         target = date.today() + timedelta(days=i)
         lunch = predict_demand(DemandRequest(date=str(target), meal_type="lunch"))
         dinner = predict_demand(DemandRequest(date=str(target), meal_type="dinner"))
-        results.append({
-            "date": str(target),
-            "lunch": lunch["predicted_meals"],
-            "dinner": dinner["predicted_meals"],
-        })
+        results.append({"date": str(target), "lunch": lunch["predicted_meals"], "dinner": dinner["predicted_meals"]})
     return results
