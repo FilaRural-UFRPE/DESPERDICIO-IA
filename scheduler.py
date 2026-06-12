@@ -1,7 +1,7 @@
 from apscheduler.schedulers.background import BackgroundScheduler
-from app.pipeline.trainer import train_all
-from app.utils.config import RETRAIN_HOUR
-from app.utils.logger import logger
+from trainer import train_all
+from config import RETRAIN_HOUR
+from logger import logger
 
 def start_scheduler():
     scheduler = BackgroundScheduler()
