@@ -1,49 +1,109 @@
+import os
 import pandas as pd
-from db import get_connection
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from logger import logger
 
+# ─── Conexão com PostgreSQL ───────────────────────────
+def _get_connection():
+    return psycopg2.connect(
+        host=os.environ.get("POSTGRES_HOST"),
+        port=os.environ.get("POSTGRES_PORT", 5432),
+        dbname=os.environ.get("POSTGRES_DB"),
+        user=os.environ.get("POSTGRES_USER"),
+        password=os.environ.get("POSTGRES_PASSWORD"),
+    )
+
+
+def _query(sql: str, params=None) -> pd.DataFrame:
+    """Executa uma query e retorna um DataFrame. Retorna vazio em caso de erro."""
+    try:
+        with _get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+                return pd.DataFrame(rows) if rows else pd.DataFrame()
+    except Exception as e:
+        logger.error(f"Erro ao conectar ao banco: {e}")
+        return pd.DataFrame()
+
+
+# ─── Coleta de agendamentos individuais ───────────────
 def collect_schedules() -> pd.DataFrame:
-    query = """
+    """
+    Retorna todos os agendamentos com status de no-show.
+    No-show = agendado mas não confirmado.
+    """
+    sql = """
         SELECT
             s.id,
             s.user_cpf,
             s.schedule_type,
-            s.meal_type,
             s.schedule_date,
             s.estimated_time,
             s.status,
+            s.meal_option,
             s.created_at,
-            CASE WHEN s.status = 'CONFIRMADO' THEN 0 ELSE 1 END AS is_noshow
-        FROM schedules s
+            CASE WHEN s.status = 'CANCELADO' THEN 1
+                 WHEN s.status = 'AGENDADO'  THEN 1
+                 ELSE 0
+            END AS is_noshow
+        FROM schedule s
         ORDER BY s.schedule_date ASC
     """
-    try:
-        with get_connection() as conn:
-            df = pd.read_sql(query, conn)
-        logger.info(f"Coletados {len(df)} agendamentos.")
-        return df
-    except Exception as e:
-        logger.error(f"Erro ao coletar agendamentos: {e}")
-        return pd.DataFrame()
+    df = _query(sql)
+    if not df.empty:
+        logger.info(f"collect_schedules: {len(df)} registos.")
+    return df
 
+
+# ─── Coleta de demanda agregada por dia ───────────────
 def collect_daily_demand() -> pd.DataFrame:
-    query = """
+    """
+    Retorna a demanda diária agregada por tipo de refeição.
+    Usado para treinar o modelo de previsão de demanda.
+    """
+    sql = """
         SELECT
             schedule_date,
-            schedule_type,
-            meal_type,
-            COUNT(*) AS total_agendados,
-            COUNT(*) FILTER (WHERE status = 'CONFIRMADO') AS total_presentes,
-            COUNT(*) FILTER (WHERE status != 'CONFIRMADO') AS total_noshow
-        FROM schedules
-        GROUP BY schedule_date, schedule_type, meal_type
+            schedule_type  AS meal_type,
+            meal_option,
+            COUNT(*)       AS total_agendados,
+            SUM(CASE WHEN status = 'CONFIRMADO' THEN 1 ELSE 0 END) AS confirmed,
+            SUM(CASE WHEN status IN ('CANCELADO', 'AGENDADO') THEN 1 ELSE 0 END) AS noshow_count
+        FROM schedule
+        GROUP BY schedule_date, schedule_type, meal_option
         ORDER BY schedule_date ASC
     """
+    df = _query(sql)
+    if not df.empty:
+        logger.info(f"collect_daily_demand: {len(df)} registos agregados.")
+    return df
+
+
+# ─── Coleta de utilizadores ───────────────────────────
+def collect_users() -> pd.DataFrame:
+    """Retorna dados dos utilizadores para análise de perfil."""
+    sql = """
+        SELECT
+            cpf,
+            role AS type,
+            created_at
+        FROM "user"
+        ORDER BY created_at ASC
+    """
+    return _query(sql)
+
+
+# ─── Health check da conexão ──────────────────────────
+def check_db_connection() -> bool:
+    """Verifica se a conexão com o banco está funcionando."""
     try:
-        with get_connection() as conn:
-            df = pd.read_sql(query, conn)
-        logger.info(f"Coletados {len(df)} registros de demanda diária.")
-        return df
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        logger.info("Conexão com o banco OK.")
+        return True
     except Exception as e:
-        logger.error(f"Erro ao coletar demanda diária: {e}")
-        return pd.DataFrame()
+        logger.error(f"Falha na conexão com o banco: {e}")
+        return False
