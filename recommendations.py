@@ -5,12 +5,22 @@ from collector import collect_schedules
 router = APIRouter()
 
 MEAL_OPTION_LABELS = {
-    "select": "👑 Select",
-    "leve_sabor": "🥗 Leve Sabor",
-    "essencial": "🍱 Essencial",
+    "select":      "👑 Select",
+    "leve_sabor":  "🥗 Leve Sabor",
+    "essencial":   "🍱 Essencial",
+    "vegetariano": "🌿 Vegetariano",
 }
 
+MEAL_OPTIONS = list(MEAL_OPTION_LABELS.keys())
+
 DAY_NAMES = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
+
+DEFAULT_DISTRIBUTION = {
+    "select":      {"percentage": 20, "label": "👑 Select"},
+    "leve_sabor":  {"percentage": 30, "label": "🥗 Leve Sabor"},
+    "essencial":   {"percentage": 45, "label": "🍱 Essencial"},
+    "vegetariano": {"percentage": 5,  "label": "🌿 Vegetariano"},
+}
 
 def _get_meal_option_col(df: pd.DataFrame) -> str:
     """Retorna o nome correto da coluna de tipo de refeição."""
@@ -19,6 +29,7 @@ def _get_meal_option_col(df: pd.DataFrame) -> str:
     if "meal_type" in df.columns:
         return "meal_type"
     return None
+
 
 @router.get("/menu")
 def recommend_menu(date: str = None):
@@ -32,11 +43,7 @@ def recommend_menu(date: str = None):
         return {
             "method": "default",
             "message": "Sem dados históricos. Usando distribuição padrão.",
-            "recommendations": {
-                "select": {"percentage": 20, "label": "👑 Select"},
-                "leve_sabor": {"percentage": 30, "label": "🥗 Leve Sabor"},
-                "essencial": {"percentage": 50, "label": "🍱 Essencial"},
-            }
+            "recommendations": DEFAULT_DISTRIBUTION,
         }
 
     col = _get_meal_option_col(df)
@@ -55,39 +62,37 @@ def recommend_menu(date: str = None):
             pass
 
     total = len(df)
+
     if total < 10:
         return {
             "method": "default",
             "message": f"Apenas {total} agendamentos. Mínimo 10 para recomendação. Usando distribuição padrão.",
-            "recommendations": {
-                "select": {"percentage": 20, "label": "👑 Select"},
-                "leve_sabor": {"percentage": 30, "label": "🥗 Leve Sabor"},
-                "essencial": {"percentage": 50, "label": "🍱 Essencial"},
-            }
+            "recommendations": DEFAULT_DISTRIBUTION,
         }
 
     counts = df[col].value_counts()
     recommendations = {}
-    for option in ["select", "leve_sabor", "essencial"]:
+
+    for option in MEAL_OPTIONS:
         count = int(counts.get(option, 0))
         pct = round((count / total) * 100, 1)
         recommendations[option] = {
             "count": count,
             "percentage": pct,
-            "label": MEAL_OPTION_LABELS.get(option, option),
+            "label": MEAL_OPTION_LABELS[option],
         }
 
-    # Ordenar por popularidade
     sorted_recs = sorted(recommendations.items(), key=lambda x: x[1]["percentage"], reverse=True)
     most_popular = sorted_recs[0][0] if sorted_recs else "essencial"
 
     return {
         "method": "historical_data",
         "total_schedules_analyzed": total,
-        "most_popular": MEAL_OPTION_LABELS.get(most_popular, most_popular),
+        "most_popular": MEAL_OPTION_LABELS[most_popular],
         "recommendations": recommendations,
-        "suggestion": f"Prepare mais {MEAL_OPTION_LABELS.get(most_popular, most_popular)} — é o tipo mais escolhido pelos estudantes.",
+        "suggestion": f"Prepare mais {MEAL_OPTION_LABELS[most_popular]} — é o tipo mais escolhido pelos estudantes.",
     }
+
 
 @router.get("/user/{cpf}")
 def recommend_for_user(cpf: str):
@@ -100,6 +105,7 @@ def recommend_for_user(cpf: str):
         return {"message": "Sem dados disponíveis"}
 
     user_df = df[df["user_cpf"] == cpf]
+
     if user_df.empty:
         return {"message": "Estudante sem histórico de agendamentos"}
 
@@ -111,13 +117,13 @@ def recommend_for_user(cpf: str):
     counts = user_df[col].value_counts()
 
     preferences = {}
-    for option in ["select", "leve_sabor", "essencial"]:
+    for option in MEAL_OPTIONS:
         count = int(counts.get(option, 0))
         pct = round((count / total) * 100, 1) if total > 0 else 0
         preferences[option] = {
             "count": count,
             "percentage": pct,
-            "label": MEAL_OPTION_LABELS.get(option, option),
+            "label": MEAL_OPTION_LABELS[option],
         }
 
     preferred = counts.idxmax() if not counts.empty else "essencial"
@@ -130,6 +136,7 @@ def recommend_for_user(cpf: str):
         "preferred_option": MEAL_OPTION_LABELS.get(preferred, preferred),
         "preferences": preferences,
     }
+
 
 @router.get("/weekly-trends")
 def weekly_trends():
@@ -165,7 +172,7 @@ def weekly_trends():
             "most_popular": MEAL_OPTION_LABELS.get(most_popular, most_popular),
             "distribution": {
                 option: round((int(counts.get(option, 0)) / total) * 100, 1)
-                for option in ["select", "leve_sabor", "essencial"]
+                for option in MEAL_OPTIONS
             }
         })
 
