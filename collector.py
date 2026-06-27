@@ -30,7 +30,18 @@ def _get(endpoint: str, params: dict = None) -> dict:
         return {}
 
 
-def _parse_schedules(raw: list) -> list:
+def collect_schedules() -> pd.DataFrame:
+    """
+    Coleta todos os agendamentos via API do SmartRU.
+    Autenticado via ADMIN_API_KEY — retorna todos sem filtro.
+    """
+    data = _get("/schedule/all")
+    raw  = data.get("data", [])
+
+    if not raw:
+        logger.warning("collect_schedules: sem agendamentos.")
+        return pd.DataFrame()
+
     records = []
     for s in raw:
         records.append({
@@ -44,30 +55,8 @@ def _parse_schedules(raw: list) -> list:
             "created_at":     s.get("created_at"),
             "is_noshow":      1 if s.get("status") in ("CANCELADO", "AGENDADO") else 0,
         })
-    return records
 
-
-def collect_schedules(days_back: int = 90) -> pd.DataFrame:
-    """
-    Coleta agendamentos dos últimos N dias via API do SmartRU.
-    O endpoint requer parâmetro date ou user_cpf.
-    """
-    all_records = []
-    today = date.today()
-
-    for i in range(days_back):
-        target = today - timedelta(days=i)
-        date_str = f"{target.day:02d}/{target.month:02d}/{target.year}"
-        data = _get("/schedule/all", params={"date": date_str})
-        raw  = data.get("data", [])
-        if raw:
-            all_records.extend(_parse_schedules(raw))
-
-    if not all_records:
-        logger.warning("collect_schedules: sem agendamentos nos últimos %d dias.", days_back)
-        return pd.DataFrame()
-
-    df = pd.DataFrame(all_records).drop_duplicates(subset=["id"])
+    df = pd.DataFrame(records).drop_duplicates(subset=["id"])
     logger.info(f"collect_schedules: {len(df)} registos recolhidos.")
     return df
 
@@ -93,12 +82,9 @@ def collect_daily_demand() -> pd.DataFrame:
 def check_api_connection() -> bool:
     """Verifica se a API do SmartRU está acessível."""
     try:
-        today = date.today()
-        date_str = f"{today.day:02d}/{today.month:02d}/{today.year}"
         res = requests.get(
             f"{SMARTRU_API_URL}/schedule/all",
             headers=_headers(),
-            params={"date": date_str},
             timeout=5,
         )
         return res.status_code < 500
