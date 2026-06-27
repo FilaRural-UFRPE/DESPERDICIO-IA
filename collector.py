@@ -1,109 +1,91 @@
 import os
+import requests
 import pandas as pd
-import psycopg2
-from psycopg2.extras import RealDictCursor
 from logger import logger
 
-# ─── Conexão com PostgreSQL ───────────────────────────
-def _get_connection():
-    return psycopg2.connect(
-        host=os.environ.get("POSTGRES_HOST"),
-        port=os.environ.get("POSTGRES_PORT", 5432),
-        dbname=os.environ.get("POSTGRES_DB"),
-        user=os.environ.get("POSTGRES_USER"),
-        password=os.environ.get("POSTGRES_PASSWORD"),
-    )
+SMARTRU_API_URL = os.environ.get("SMARTRU_API_URL", "https://semdesperdicio.smartru.com.br")
+ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
 
+def _headers():
+    return {
+        "Authorization": f"Bearer {ADMIN_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
-def _query(sql: str, params=None) -> pd.DataFrame:
-    """Executa uma query e retorna um DataFrame. Retorna vazio em caso de erro."""
+def _get(endpoint: str, params: dict = None) -> dict:
     try:
-        with _get_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(sql, params)
-                rows = cur.fetchall()
-                return pd.DataFrame(rows) if rows else pd.DataFrame()
+        res = requests.get(
+            f"{SMARTRU_API_URL}{endpoint}",
+            headers=_headers(),
+            params=params,
+            timeout=10,
+        )
+        res.raise_for_status()
+        return res.json()
     except Exception as e:
-        logger.error(f"Erro ao conectar ao banco: {e}")
+        logger.error(f"Erro ao chamar API SmartRU [{endpoint}]: {e}")
+        return {}
+
+
+def collect_schedules() -> pd.DataFrame:
+    """Coleta todos os agendamentos via API do SmartRU."""
+    data = _get("/schedule/all")
+    raw  = data.get("data", [])
+
+    if not raw:
+        logger.warning("collect_schedules: sem dados retornados pela API.")
         return pd.DataFrame()
 
+    records = []
+    for s in raw:
+        records.append({
+            "id":            s.get("id"),
+            "user_cpf":      s.get("user_cpf"),
+            "schedule_type": s.get("schedule_type"),
+            "schedule_date": s.get("schedule_date"),
+            "estimated_time": s.get("estimated_time"),
+            "status":        s.get("status", "AGENDADO"),
+            "meal_option":   s.get("meal_option") or s.get("meal_type", "essencial"),
+            "created_at":    s.get("created_at"),
+            "is_noshow":     1 if s.get("status") in ("CANCELADO", "AGENDADO") else 0,
+        })
 
-# ─── Coleta de agendamentos individuais ───────────────
-def collect_schedules() -> pd.DataFrame:
-    """
-    Retorna todos os agendamentos com status de no-show.
-    No-show = agendado mas não confirmado.
-    """
-    sql = """
-        SELECT
-            s.id,
-            s.user_cpf,
-            s.schedule_type,
-            s.schedule_date,
-            s.estimated_time,
-            s.status,
-            s.meal_option,
-            s.created_at,
-            CASE WHEN s.status = 'CANCELADO' THEN 1
-                 WHEN s.status = 'AGENDADO'  THEN 1
-                 ELSE 0
-            END AS is_noshow
-        FROM schedule s
-        ORDER BY s.schedule_date ASC
-    """
-    df = _query(sql)
-    if not df.empty:
-        logger.info(f"collect_schedules: {len(df)} registos.")
+    df = pd.DataFrame(records)
+    logger.info(f"collect_schedules: {len(df)} registos via API.")
     return df
 
 
-# ─── Coleta de demanda agregada por dia ───────────────
 def collect_daily_demand() -> pd.DataFrame:
     """
-    Retorna a demanda diária agregada por tipo de refeição.
-    Usado para treinar o modelo de previsão de demanda.
+    Agrega os agendamentos por dia e tipo de refeição.
+    Derivado do collect_schedules para não depender do banco.
     """
-    sql = """
-        SELECT
-            schedule_date,
-            schedule_type  AS meal_type,
-            meal_option,
-            COUNT(*)       AS total_agendados,
-            SUM(CASE WHEN status = 'CONFIRMADO' THEN 1 ELSE 0 END) AS confirmed,
-            SUM(CASE WHEN status IN ('CANCELADO', 'AGENDADO') THEN 1 ELSE 0 END) AS noshow_count
-        FROM schedule
-        GROUP BY schedule_date, schedule_type, meal_option
-        ORDER BY schedule_date ASC
-    """
-    df = _query(sql)
-    if not df.empty:
-        logger.info(f"collect_daily_demand: {len(df)} registos agregados.")
-    return df
+    df = collect_schedules()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df["schedule_date"] = pd.to_datetime(df["schedule_date"]).dt.date.astype(str)
+
+    agg = df.groupby(["schedule_date", "schedule_type", "meal_option"]).agg(
+        total_agendados=("id", "count"),
+        confirmed=("is_noshow", lambda x: (x == 0).sum()),
+        noshow_count=("is_noshow", "sum"),
+    ).reset_index()
+
+    agg.rename(columns={"schedule_type": "meal_type"}, inplace=True)
+    logger.info(f"collect_daily_demand: {len(agg)} registos agregados.")
+    return agg
 
 
-# ─── Coleta de utilizadores ───────────────────────────
-def collect_users() -> pd.DataFrame:
-    """Retorna dados dos utilizadores para análise de perfil."""
-    sql = """
-        SELECT
-            cpf,
-            role AS type,
-            created_at
-        FROM "user"
-        ORDER BY created_at ASC
-    """
-    return _query(sql)
-
-
-# ─── Health check da conexão ──────────────────────────
-def check_db_connection() -> bool:
-    """Verifica se a conexão com o banco está funcionando."""
+def check_api_connection() -> bool:
+    """Verifica se a API do SmartRU está acessível."""
     try:
-        with _get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-        logger.info("Conexão com o banco OK.")
-        return True
-    except Exception as e:
-        logger.error(f"Falha na conexão com o banco: {e}")
+        res = requests.get(
+            f"{SMARTRU_API_URL}/schedule/all",
+            headers=_headers(),
+            timeout=5,
+        )
+        return res.status_code in (200, 401, 403)  # qualquer resposta = API está online
+    except Exception:
         return False
