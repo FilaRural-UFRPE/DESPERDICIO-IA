@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 from logger import logger
 
-SMARTRU_API_URL = os.environ.get("SMARTRU_API_URL", "https://semdesperdicio.smartru.com.br")
+SMARTRU_API_URL = os.environ.get("SMARTRU_API_URL", "https://semdesperdicio.smartru.com.br/api")
 ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
 
 def _headers():
