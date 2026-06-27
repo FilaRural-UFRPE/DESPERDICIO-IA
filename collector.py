@@ -4,7 +4,7 @@ import pandas as pd
 from logger import logger
 
 SMARTRU_API_URL = os.environ.get("SMARTRU_API_URL", "https://semdesperdicio.smartru.com.br/api")
-ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
+ADMIN_API_KEY   = os.environ.get("ADMIN_API_KEY", "")
 
 def _headers():
     return {
@@ -20,6 +20,10 @@ def _get(endpoint: str, params: dict = None) -> dict:
             params=params,
             timeout=10,
         )
+        # 404 = sem dados (não é erro de ligação)
+        if res.status_code == 404:
+            logger.warning(f"API [{endpoint}] retornou 404 — sem dados.")
+            return {"data": []}
         res.raise_for_status()
         return res.json()
     except Exception as e:
@@ -33,21 +37,21 @@ def collect_schedules() -> pd.DataFrame:
     raw  = data.get("data", [])
 
     if not raw:
-        logger.warning("collect_schedules: sem dados retornados pela API.")
+        logger.warning("collect_schedules: sem agendamentos.")
         return pd.DataFrame()
 
     records = []
     for s in raw:
         records.append({
-            "id":            s.get("id"),
-            "user_cpf":      s.get("user_cpf"),
-            "schedule_type": s.get("schedule_type"),
-            "schedule_date": s.get("schedule_date"),
+            "id":             s.get("id"),
+            "user_cpf":       s.get("user_cpf"),
+            "schedule_type":  s.get("schedule_type"),
+            "schedule_date":  s.get("schedule_date"),
             "estimated_time": s.get("estimated_time"),
-            "status":        s.get("status", "AGENDADO"),
-            "meal_option":   s.get("meal_option") or s.get("meal_type", "essencial"),
-            "created_at":    s.get("created_at"),
-            "is_noshow":     1 if s.get("status") in ("CANCELADO", "AGENDADO") else 0,
+            "status":         s.get("status", "AGENDADO"),
+            "meal_option":    s.get("meal_option") or s.get("meal_type", "essencial"),
+            "created_at":     s.get("created_at"),
+            "is_noshow":      1 if s.get("status") in ("CANCELADO", "AGENDADO") else 0,
         })
 
     df = pd.DataFrame(records)
@@ -56,12 +60,7 @@ def collect_schedules() -> pd.DataFrame:
 
 
 def collect_daily_demand() -> pd.DataFrame:
-    """
-    Agrega os agendamentos por dia e tipo de refeição.
-    Derivado do collect_schedules para não depender do banco.
-    """
     df = collect_schedules()
-
     if df.empty:
         return pd.DataFrame()
 
@@ -86,6 +85,7 @@ def check_api_connection() -> bool:
             headers=_headers(),
             timeout=5,
         )
-        return res.status_code in (200, 401, 403)  # qualquer resposta = API está online
+        # Qualquer resposta < 500 = API está online
+        return res.status_code < 500
     except Exception:
         return False
