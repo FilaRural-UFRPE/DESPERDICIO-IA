@@ -1,34 +1,30 @@
 from fastapi import APIRouter
-from db import get_connection
+from collector import check_api_connection, collect_schedules
 from logger import logger
 
 router = APIRouter()
 
 @router.get("/health")
 def health():
-    db_ok = False
-    db_error = None
+    api_ok = False
     schedules_count = 0
+    error = None
 
     try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                db_ok = True
-                # Conta agendamentos para confirmar acesso real aos dados
-                cur.execute("SELECT COUNT(*) AS total FROM schedule")
-                row = cur.fetchone()
-                schedules_count = row["total"] if row else 0
+        api_ok = check_api_connection()
+        if api_ok:
+            df = collect_schedules()
+            schedules_count = len(df)
     except Exception as e:
-        db_error = str(e)
-        logger.error(f"Health check DB falhou: {e}")
+        error = str(e)
+        logger.error(f"Health check falhou: {e}")
 
     return {
-        "status": "ok" if db_ok else "degraded",
+        "status": "ok" if api_ok else "degraded",
         "service": "SmartRU AI",
-        "db": {
-            "connected": db_ok,
+        "api": {
+            "connected": api_ok,
             "schedules_count": schedules_count,
-            "error": db_error,
+            "error": error,
         },
     }
