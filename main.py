@@ -7,7 +7,15 @@ import recommendations
 from scheduler import start_scheduler
 from trainer import train_all
 from logger import logger
-import threading
+
+# Treina os modelos ANTES de registar os routers
+# para garantir que o modelo está disponível desde o primeiro request
+logger.info("Treino inicial antes do arranque do servidor...")
+try:
+    train_all()
+    logger.info("Treino inicial concluído.")
+except Exception as e:
+    logger.error(f"Erro no treino inicial: {e}")
 
 app = FastAPI(
     title="SmartRU AI",
@@ -26,16 +34,3 @@ async def startup():
     logger.info("SmartRU AI iniciando...")
     start_scheduler()
     logger.info("Scheduler de treino automático ativo.")
-    thread = threading.Thread(target=_train_on_startup, daemon=True)
-    thread.start()
-
-def _train_on_startup():
-    try:
-        logger.info("Treino inicial no arranque...")
-        train_all()
-        # Invalida o cache do demand.py para usar o modelo novo
-        demand._df_cache = None
-        demand._df_cache_date = None
-        logger.info("Treino inicial concluído. Cache invalidado.")
-    except Exception as e:
-        logger.error(f"Erro no treino inicial: {e}")
