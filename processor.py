@@ -94,6 +94,8 @@ def process_noshow_features(df: pd.DataFrame) -> pd.DataFrame:
     df["schedule_date"] = pd.to_datetime(df["schedule_date"])
     df["created_at"]    = pd.to_datetime(df["created_at"])
 
+    df["schedule_date"] = df["schedule_date"].dt.tz_localize(None) if df["schedule_date"].dt.tz is not None else df["schedule_date"]
+    df["created_at"] = df["created_at"].dt.tz_localize(None) if df["created_at"].dt.tz is not None else df["created_at"]
     df["days_in_advance"] = (df["schedule_date"] - df["created_at"].dt.normalize()).dt.days.clip(lower=0)
     df["day_of_week"]     = df["schedule_date"].dt.dayofweek
     df["month"]           = df["schedule_date"].dt.month
