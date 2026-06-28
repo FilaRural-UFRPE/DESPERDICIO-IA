@@ -28,6 +28,20 @@ MEAL_OPTION_MULTIPLIER = {
     "vegetariano": 0.05,
 }
 
+# Cache global para evitar chamadas repetidas à API
+_df_cache = None
+_df_cache_date = None
+
+
+def _get_df():
+    """Retorna DataFrame com cache por dia."""
+    global _df_cache, _df_cache_date
+    today = str(date.today())
+    if _df_cache is None or _df_cache_date != today:
+        _df_cache = collect_daily_demand()
+        _df_cache_date = today
+    return _df_cache
+
 
 class DemandRequest(BaseModel):
     date: str
@@ -40,31 +54,25 @@ def _load_model():
     if not os.path.exists(path):
         return None
     m = joblib.load(path)
-    return m  # pode ser None (prior) ou um XGBRegressor
+    # Se joblib salvou None (prior), retorna None
+    return m if hasattr(m, 'predict') else None
 
 
 def _prior_predict(target_date: pd.Timestamp, meal_type: str, meal_option: str, df: pd.DataFrame) -> dict:
-    """
-    Fallback inteligente quando não há modelo treinado.
-    Usa prior por dia da semana + histórico disponível (mesmo que pequeno).
-    """
     prior = PRIOR_DEMAND_BY_WEEKDAY.get(target_date.dayofweek, 100)
 
-    # Se há qualquer dado histórico, ajusta o prior proporcionalmente
     if not df.empty:
-        df["schedule_date"] = pd.to_datetime(df["schedule_date"])
-        same_day = df[df["schedule_date"].dt.dayofweek == target_date.dayofweek]
+        df2 = df.copy()
+        df2["schedule_date"] = pd.to_datetime(df2["schedule_date"])
+        same_day = df2[df2["schedule_date"].dt.dayofweek == target_date.dayofweek]
         if not same_day.empty:
             observed_mean = same_day["total_agendados"].mean()
-            # Blending: quanto mais dados, mais peso no observado
             weight = min(len(same_day) / 10, 1.0)
             prior = weight * observed_mean + (1 - weight) * prior
 
-    # Ajuste por tipo de refeição
     if meal_type == "dinner":
-        prior *= 0.6  # jantar tipicamente tem ~60% do almoço
+        prior *= 0.6
 
-    # Ajuste por opção de refeição
     option_share = MEAL_OPTION_MULTIPLIER.get(meal_option, 0.45)
     predicted = int(prior * option_share)
 
@@ -72,7 +80,6 @@ def _prior_predict(target_date: pd.Timestamp, meal_type: str, meal_option: str, 
         "predicted_meals": max(0, predicted),
         "confidence": 0.45,
         "method": "prior_with_blending",
-        "note": "Poucos dados. Estimativa baseada em padrões típicos de RU + histórico disponível.",
     }
 
 
@@ -83,6 +90,8 @@ def _build_row(target_date: pd.Timestamp, df: pd.DataFrame, meal_type: str, meal
     def tail_val(n):  return float(df["total_agendados"].iloc[-n]) if len(df) >= n else global_mean
 
     rolling_7d = tail_mean(7)
+    prior = PRIOR_DEMAND_BY_WEEKDAY.get(target_date.dayofweek, 100)
+
     return {
         "day_of_week":   target_date.dayofweek,
         "week_of_month": target_date.day // 7,
@@ -101,17 +110,16 @@ def _build_row(target_date: pd.Timestamp, df: pd.DataFrame, meal_type: str, meal
         "lag_7d":        tail_val(7),
         "trend_7d":      tail_val(1) - rolling_7d,
         "std_7d":        df["total_agendados"].tail(7).std() if not df.empty else 0,
-        "prior_demand":  PRIOR_DEMAND_BY_WEEKDAY.get(target_date.dayofweek, 100),
+        "prior_demand":  prior,
     }
 
 
 @router.post("/predict")
 def predict_demand(req: DemandRequest):
     model = _load_model()
-    df    = collect_daily_demand()
+    df    = _get_df()
     target_date = pd.to_datetime(req.date)
 
-    # Sem modelo ou modelo é None (prior salvo pelo trainer)
     if model is None:
         return _prior_predict(target_date, req.meal_type, req.meal_option, df)
 
@@ -122,14 +130,28 @@ def predict_demand(req: DemandRequest):
             X[f] = 0
     X = X[DEMAND_FEATURES].fillna(0)
 
-    pred = int(max(0, round(model.predict(X)[0])))
-    std  = df["total_agendados"].tail(7).std() if not df.empty else pred * 0.2
+    xgb_pred = float(model.predict(X)[0])
+
+    # Blending: combina XGBoost com prior
+    # Quanto mais dados, mais peso no XGBoost
+    n_records = len(df) if not df.empty else 0
+    xgb_weight = min(n_records / 100, 0.8)  # máximo 80% XGBoost até 100 registos
+
+    prior_result = _prior_predict(target_date, req.meal_type, req.meal_option, df)
+    prior_pred   = prior_result["predicted_meals"]
+
+    blended = int(xgb_weight * xgb_pred + (1 - xgb_weight) * prior_pred)
+    blended = max(0, blended)
+
+    std = df["total_agendados"].tail(7).std() if not df.empty else blended * 0.2
+
+    method = "xgboost" if xgb_weight >= 0.8 else f"blended_{int(xgb_weight*100)}pct_xgb"
 
     return {
-        "predicted_meals": pred,
-        "confidence_interval": {"lower": max(0, pred - int(std)), "upper": pred + int(std)},
-        "confidence": 0.85,
-        "method": "xgboost",
+        "predicted_meals": blended,
+        "confidence_interval": {"lower": max(0, blended - int(std)), "upper": blended + int(std)},
+        "confidence": 0.5 + xgb_weight * 0.35,
+        "method": method,
         "meal_type": req.meal_type,
         "meal_option": req.meal_option,
     }
@@ -137,6 +159,8 @@ def predict_demand(req: DemandRequest):
 
 @router.get("/forecast")
 def forecast(days: int = 7):
+    """Previsão de demanda para os próximos N dias."""
+    df = _get_df()  # carrega uma vez só
     results = []
     for i in range(1, days + 1):
         target = date.today() + timedelta(days=i)
