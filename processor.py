@@ -55,9 +55,11 @@ def process_demand_features(df: pd.DataFrame) -> pd.DataFrame:
     df["is_weekend"]    = df["day_of_week"].isin([5, 6]).astype(int)
     df["is_monday"]     = (df["day_of_week"] == 0).astype(int)
     df["is_friday"]     = (df["day_of_week"] == 4).astype(int)
-    df["is_lunch"]      = (df["schedule_type"] == "lunch").astype(int)
+    meal_col = "meal_type" if "meal_type" in df.columns else "schedule_type"
+    df["is_lunch"]      = (df[meal_col] == "lunch").astype(int)
 
-    df["meal_type_enc"] = df["meal_type"].map(MEAL_TYPE_ENC).fillna(2).astype(int)
+    option_col = "meal_option" if "meal_option" in df.columns else "meal_type"
+    df["meal_type_enc"] = df[option_col].map(MEAL_TYPE_ENC).fillna(2).astype(int)
 
     df = df.sort_values("schedule_date").reset_index(drop=True)
 
