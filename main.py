@@ -5,7 +5,9 @@ import noshow
 import patterns
 import recommendations
 from scheduler import start_scheduler
+from trainer import train_all
 from logger import logger
+import threading
 
 app = FastAPI(
     title="SmartRU AI",
@@ -24,3 +26,14 @@ async def startup():
     logger.info("SmartRU AI iniciando...")
     start_scheduler()
     logger.info("Scheduler de treino automático ativo.")
+    # Treina os modelos em background para não bloquear o arranque
+    thread = threading.Thread(target=_train_on_startup, daemon=True)
+    thread.start()
+
+def _train_on_startup():
+    try:
+        logger.info("Treino inicial no arranque...")
+        train_all()
+        logger.info("Treino inicial concluído.")
+    except Exception as e:
+        logger.error(f"Erro no treino inicial: {e}")
