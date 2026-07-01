@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import health
 import demand
 import noshow
@@ -9,7 +10,6 @@ from trainer import train_all
 from logger import logger
 
 # Treina os modelos ANTES de registar os routers
-# para garantir que o modelo está disponível desde o primeiro request
 logger.info("Treino inicial antes do arranque do servidor...")
 try:
     train_all()
@@ -21,6 +21,19 @@ app = FastAPI(
     title="SmartRU AI",
     description="Microserviço de IA para otimização do Restaurante Universitário da UFRPE",
     version="1.0.0",
+)
+
+# CORS — permite chamadas do frontend SmartRU
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://semdesperdicio.smartru.com.br",
+        "http://localhost:5173",
+        "http://localhost:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(health.router, tags=["health"])
