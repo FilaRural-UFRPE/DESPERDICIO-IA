@@ -7,8 +7,8 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from config import MODEL_DIR
 from logger import logger
-from collector import collect_daily_demand
-from processor import process_demand_features, MEAL_TYPE_ENC, PRIOR_DEMAND_BY_WEEKDAY
+from collector import collect_daily_demand, collect_menu_dishes
+from processor import MEAL_TYPE_ENC, PRIOR_DEMAND_BY_WEEKDAY
 
 router = APIRouter()
 
@@ -19,6 +19,8 @@ DEMAND_FEATURES = [
     "rolling_3d", "rolling_7d", "rolling_14d", "rolling_30d",
     "lag_1d", "lag_7d", "trend_7d", "std_7d",
     "prior_demand",
+    "menu_has_chicken", "menu_has_beef", "menu_has_fish",
+    "menu_has_vegetarian", "menu_num_options",
 ]
 
 MEAL_OPTION_MULTIPLIER = {
@@ -28,19 +30,29 @@ MEAL_OPTION_MULTIPLIER = {
     "vegetariano": 0.05,
 }
 
-# Cache global para evitar chamadas repetidas à API
 _df_cache = None
 _df_cache_date = None
+_menu_cache = None
+_menu_cache_date = None
 
 
 def _get_df():
-    """Retorna DataFrame com cache por dia."""
     global _df_cache, _df_cache_date
     today = str(date.today())
     if _df_cache is None or _df_cache_date != today:
         _df_cache = collect_daily_demand()
         _df_cache_date = today
     return _df_cache
+
+
+def _get_menu_df():
+    """Cache dos dados de cardápio — atualiza a cada nova consulta do dia."""
+    global _menu_cache, _menu_cache_date
+    today = str(date.today())
+    if _menu_cache is None or _menu_cache_date != today:
+        _menu_cache = collect_menu_dishes()
+        _menu_cache_date = today
+    return _menu_cache
 
 
 class DemandRequest(BaseModel):
@@ -54,8 +66,36 @@ def _load_model():
     if not os.path.exists(path):
         return None
     m = joblib.load(path)
-    # Se joblib salvou None (prior), retorna None
     return m if hasattr(m, 'predict') else None
+
+
+def _get_menu_features_for_date(target_date: pd.Timestamp, meal_type: str) -> dict:
+    """Busca as features do cardápio para uma data específica, se existirem."""
+    menu_df = _get_menu_df()
+    defaults = {
+        "menu_has_chicken": 0, "menu_has_beef": 0, "menu_has_fish": 0,
+        "menu_has_vegetarian": 0, "menu_num_options": 0,
+    }
+
+    if menu_df.empty:
+        return defaults
+
+    menu_df = menu_df.copy()
+    menu_df["menu_date"] = pd.to_datetime(menu_df["menu_date"])
+    match = menu_df[menu_df["menu_date"].dt.date == target_date.date()]
+
+    if match.empty:
+        return defaults
+
+    row = match.iloc[0]
+    prefix = "lunch" if meal_type == "lunch" else "dinner"
+    return {
+        "menu_has_chicken":    row.get(f"{prefix}_has_chicken", 0),
+        "menu_has_beef":       row.get(f"{prefix}_has_beef", 0),
+        "menu_has_fish":       row.get(f"{prefix}_has_fish", 0),
+        "menu_has_vegetarian": row.get(f"{prefix}_has_vegetarian", 0),
+        "menu_num_options":    row.get(f"{prefix}_num_options", 0),
+    }
 
 
 def _prior_predict(target_date: pd.Timestamp, meal_type: str, meal_option: str, df: pd.DataFrame) -> dict:
@@ -72,6 +112,13 @@ def _prior_predict(target_date: pd.Timestamp, meal_type: str, meal_option: str, 
 
     if meal_type == "dinner":
         prior *= 0.6
+
+    # Ajuste simples baseado no cardápio (mesmo sem modelo treinado)
+    menu_features = _get_menu_features_for_date(target_date, meal_type)
+    if menu_features["menu_has_chicken"]:
+        prior *= 1.10  # frango tende a aumentar procura
+    if menu_features["menu_has_vegetarian"] and meal_option == "vegetariano":
+        prior *= 1.15
 
     option_share = MEAL_OPTION_MULTIPLIER.get(meal_option, 0.45)
     predicted = int(prior * option_share)
@@ -90,9 +137,9 @@ def _build_row(target_date: pd.Timestamp, df: pd.DataFrame, meal_type: str, meal
     def tail_val(n):  return float(df["total_agendados"].iloc[-n]) if len(df) >= n else global_mean
 
     rolling_7d = tail_mean(7)
-    prior = PRIOR_DEMAND_BY_WEEKDAY.get(target_date.dayofweek, 100)
+    menu_features = _get_menu_features_for_date(target_date, meal_type)
 
-    return {
+    row = {
         "day_of_week":   target_date.dayofweek,
         "week_of_month": target_date.day // 7,
         "month":         target_date.month,
@@ -110,8 +157,10 @@ def _build_row(target_date: pd.Timestamp, df: pd.DataFrame, meal_type: str, meal
         "lag_7d":        tail_val(7),
         "trend_7d":      tail_val(1) - rolling_7d,
         "std_7d":        df["total_agendados"].tail(7).std() if not df.empty else 0,
-        "prior_demand":  prior,
+        "prior_demand":  PRIOR_DEMAND_BY_WEEKDAY.get(target_date.dayofweek, 100),
     }
+    row.update(menu_features)
+    return row
 
 
 @router.post("/predict")
@@ -132,10 +181,8 @@ def predict_demand(req: DemandRequest):
 
     xgb_pred = float(model.predict(X)[0])
 
-    # Blending: combina XGBoost com prior
-    # Quanto mais dados, mais peso no XGBoost
     n_records = len(df) if not df.empty else 0
-    xgb_weight = min(n_records / 100, 0.8)  # máximo 80% XGBoost até 100 registos
+    xgb_weight = min(n_records / 100, 0.8)
 
     prior_result = _prior_predict(target_date, req.meal_type, req.meal_option, df)
     prior_pred   = prior_result["predicted_meals"]
@@ -144,7 +191,6 @@ def predict_demand(req: DemandRequest):
     blended = max(0, blended)
 
     std = df["total_agendados"].tail(7).std() if not df.empty else blended * 0.2
-
     method = "xgboost" if xgb_weight >= 0.8 else f"blended_{int(xgb_weight*100)}pct_xgb"
 
     return {
@@ -154,13 +200,13 @@ def predict_demand(req: DemandRequest):
         "method": method,
         "meal_type": req.meal_type,
         "meal_option": req.meal_option,
+        "menu_influenced": any(v for k, v in row.items() if k.startswith("menu_") and k != "menu_num_options"),
     }
 
 
 @router.get("/forecast")
 def forecast(days: int = 7):
-    """Previsão de demanda para os próximos N dias."""
-    df = _get_df()  # carrega uma vez só
+    df = _get_df()
     results = []
     for i in range(1, days + 1):
         target = date.today() + timedelta(days=i)
@@ -177,7 +223,6 @@ def forecast(days: int = 7):
 
 @router.get("/forecast/by-meal-option")
 def forecast_by_meal_option(days: int = 7):
-    """Previsão detalhada por tipo de refeição."""
     meal_options = list(MEAL_OPTION_MULTIPLIER.keys())
     results = []
     for i in range(1, days + 1):
@@ -196,7 +241,6 @@ def forecast_by_meal_option(days: int = 7):
 
 @router.get("/waste-risk")
 def waste_risk(days: int = 7):
-    """Estima risco de desperdício por dia."""
     from noshow import noshow_summary
     results = []
     for i in range(1, days + 1):
@@ -226,3 +270,63 @@ def waste_risk(days: int = 7):
             },
         })
     return results
+
+
+@router.get("/menu-insights")
+def menu_insights():
+    """
+    Análise estratégica: quais pratos geram mais demanda.
+    Compara dias com/sem determinados ingredientes.
+    """
+    df = _get_df()
+    menu_df = _get_menu_df()
+
+    if df.empty or menu_df.empty:
+        return {
+            "available": False,
+            "message": "Dados insuficientes de cardápio ou demanda para gerar insights.",
+        }
+
+    df = df.copy()
+    df["schedule_date"] = pd.to_datetime(df["schedule_date"]).dt.date.astype(str)
+    menu_df = menu_df.copy()
+    menu_df["menu_date"] = pd.to_datetime(menu_df["menu_date"]).dt.date.astype(str)
+
+    merged = df.merge(menu_df, left_on="schedule_date", right_on="menu_date", how="inner")
+
+    if merged.empty:
+        return {
+            "available": False,
+            "message": "Sem sobreposição entre datas de agendamento e cardápio.",
+        }
+
+    insights = {}
+    for ingredient in ["chicken", "beef", "fish", "vegetarian"]:
+        col = f"lunch_has_{ingredient}"
+        if col in merged.columns:
+            with_it    = merged[merged[col] == 1]["total_agendados"].mean()
+            without_it = merged[merged[col] == 0]["total_agendados"].mean()
+            if pd.notna(with_it) and pd.notna(without_it) and without_it > 0:
+                diff_pct = round(((with_it - without_it) / without_it) * 100, 1)
+                insights[ingredient] = {
+                    "avg_demand_with":    round(with_it, 1),
+                    "avg_demand_without": round(without_it, 1),
+                    "impact_pct":         diff_pct,
+                }
+
+    return {
+        "available": True,
+        "total_days_analyzed": len(merged),
+        "insights": insights,
+        "suggestion": _generate_suggestion(insights),
+    }
+
+
+def _generate_suggestion(insights: dict) -> str:
+    if not insights:
+        return "Dados insuficientes para sugestões."
+
+    best = max(insights.items(), key=lambda x: x[1]["impact_pct"], default=None)
+    if best and best[1]["impact_pct"] > 5:
+        return f"Pratos com {best[0]} aumentam a demanda em {best[1]['impact_pct']}% em média. Considere incluir mais vezes por semana."
+    return "Nenhum ingrediente com impacto significativo identificado ainda."
