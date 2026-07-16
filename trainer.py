@@ -5,7 +5,7 @@ import numpy as np
 from xgboost import XGBRegressor, XGBClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, f1_score, roc_auc_score
-from collector import collect_schedules, collect_daily_demand
+from collector import collect_schedules, collect_daily_demand, collect_menu_dishes
 from processor import (
     process_demand_features, process_noshow_features,
     MEAL_TYPE_ENC, PRIOR_DEMAND_BY_WEEKDAY, PRIOR_NOSHOW_BY_WEEKDAY
@@ -20,6 +20,9 @@ DEMAND_FEATURES = [
     "rolling_3d", "rolling_7d", "rolling_14d", "rolling_30d",
     "lag_1d", "lag_7d", "trend_7d", "std_7d",
     "prior_demand",
+    # Features do cardápio
+    "menu_has_chicken", "menu_has_beef", "menu_has_fish",
+    "menu_has_vegetarian", "menu_num_options",
 ]
 
 NOSHOW_FEATURES = [
@@ -29,7 +32,6 @@ NOSHOW_FEATURES = [
     "user_reliability_score", "prior_noshow",
 ]
 
-# Mínimos para cada modelo — muito baixos para funcionar cedo
 MIN_DEMAND_ROWS = 3
 MIN_NOSHOW_ROWS = 10
 
@@ -41,31 +43,25 @@ def _safe_features(df: pd.DataFrame, features: list) -> pd.DataFrame:
     return df[features].fillna(0)
 
 
-def _prior_demand_model():
-    """
-    Modelo prior baseado em conhecimento de domínio.
-    Usado quando não há dados suficientes para treinar o XGBoost.
-    """
-    return None  # Sinaliza que deve usar o prior diretamente
-
-
 def train_demand_model():
     df = collect_daily_demand()
 
     if df.empty or len(df) < MIN_DEMAND_ROWS:
-        logger.warning(f"Poucos dados para demanda ({len(df)} registos). "
-                       f"A IA usará prior por dia da semana.")
-        # Salva os priors para que o predict os use
+        logger.warning(f"Poucos dados para demanda ({len(df)} registos). Usando prior.")
         os.makedirs(MODEL_DIR, exist_ok=True)
         joblib.dump(None, f"{MODEL_DIR}/demand_model.joblib")
         joblib.dump({"method": "prior", "rows": len(df)}, f"{MODEL_DIR}/demand_metrics.joblib")
         return None
 
-    df = process_demand_features(df)
+    # Recolhe dados do cardápio (se o campo dishes existir no banco)
+    menu_df = collect_menu_dishes()
+    has_menu_data = not menu_df.empty
+    logger.info(f"Dados de cardápio disponíveis: {has_menu_data} ({len(menu_df)} cardápios)")
+
+    df = process_demand_features(df, menu_df=menu_df if has_menu_data else None)
     X = _safe_features(df, DEMAND_FEATURES)
     y = df["total_agendados"]
 
-    # Com poucos dados: sem split de validação, treina em tudo
     if len(df) < 20:
         logger.info(f"Poucos dados ({len(df)}). Treinando sem validação.")
         model = XGBRegressor(
@@ -75,10 +71,8 @@ def train_demand_model():
         )
         model.fit(X, y)
         mae = mean_absolute_error(y, model.predict(X))
-        logger.info(f"Modelo demanda (poucos dados) — MAE treino: {mae:.2f}")
-        metrics = {"method": "xgboost_small", "mae": mae, "rows": len(df)}
+        metrics = {"method": "xgboost_small", "mae": mae, "rows": len(df), "has_menu_data": has_menu_data}
     else:
-        # Dados suficientes: split temporal
         split = max(1, int(len(df) * 0.8))
         X_train, X_val = X.iloc[:split], X.iloc[split:]
         y_train, y_val = y.iloc[:split], y.iloc[split:]
@@ -90,8 +84,16 @@ def train_demand_model():
         )
         model.fit(X_train, y_train)
         mae = mean_absolute_error(y_val, model.predict(X_val))
-        logger.info(f"Modelo demanda — MAE validação: {mae:.2f}")
-        metrics = {"method": "xgboost", "mae": mae, "rows": len(df)}
+        metrics = {"method": "xgboost", "mae": mae, "rows": len(df), "has_menu_data": has_menu_data}
+
+    logger.info(f"Modelo demanda — MAE: {metrics['mae']:.2f} | Com dados de cardápio: {has_menu_data}")
+
+    # Feature importance — mostra se os pratos ajudam na previsão
+    if has_menu_data:
+        importance = dict(zip(DEMAND_FEATURES, model.feature_importances_))
+        menu_importance = {k: v for k, v in importance.items() if k.startswith("menu_")}
+        logger.info(f"Importância das features de cardápio: {menu_importance}")
+        metrics["menu_feature_importance"] = menu_importance
 
     os.makedirs(MODEL_DIR, exist_ok=True)
     joblib.dump(model, f"{MODEL_DIR}/demand_model.joblib")
@@ -104,8 +106,7 @@ def train_noshow_model():
     df = collect_schedules()
 
     if df.empty or len(df) < MIN_NOSHOW_ROWS:
-        logger.warning(f"Poucos dados para no-show ({len(df)} registos). "
-                       f"A IA usará prior por dia da semana.")
+        logger.warning(f"Poucos dados para no-show ({len(df)} registos). Usando prior.")
         os.makedirs(MODEL_DIR, exist_ok=True)
         joblib.dump(None, f"{MODEL_DIR}/noshow_model.joblib")
         joblib.dump({"method": "prior", "rows": len(df)}, f"{MODEL_DIR}/noshow_metrics.joblib")
@@ -122,18 +123,15 @@ def train_noshow_model():
 
     pos_weight = (y == 0).sum() / max((y == 1).sum(), 1)
 
-    # Com poucos dados: sem estratificação, treina em tudo
     if len(df) < 50:
-        logger.info(f"Poucos dados no-show ({len(df)}). Treinando sem split.")
         model = XGBClassifier(
             n_estimators=50, max_depth=3, learning_rate=0.1,
             scale_pos_weight=pos_weight,
             random_state=42, n_jobs=2, eval_metric="logloss",
         )
         model.fit(X, y)
-        f1  = f1_score(y, model.predict(X), zero_division=0)
-        auc = 0.0
-        metrics = {"method": "xgboost_small", "f1": f1, "auc": auc, "rows": len(df)}
+        f1 = f1_score(y, model.predict(X), zero_division=0)
+        metrics = {"method": "xgboost_small", "f1": f1, "auc": 0.0, "rows": len(df)}
     else:
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, random_state=42, stratify=y
