@@ -47,3 +47,36 @@ async def startup():
     logger.info("SmartRU AI iniciando...")
     start_scheduler()
     logger.info("Scheduler de treino automático ativo.")
+
+"""
+Adiciona este código ao final do main.py do DESPERDICIO-IA.
+Endpoint temporário para debug — REMOVER em produção final.
+"""
+
+@app.get("/debug/schedules-count")
+def debug_schedules_count():
+    from collector import collect_schedules
+    df = collect_schedules()
+    return {"total_agendamentos": len(df)}
+
+
+@app.get("/debug/users-count")
+def debug_users_count():
+    import requests, os
+    headers = {"Authorization": f"Bearer {os.environ.get('ADMIN_API_KEY', '')}"}
+    r = requests.get(
+        "https://semdesperdicio.smartru.com.br/api/users",
+        headers=headers,
+    )
+    data = r.json()
+    return {"total_cadastrados": len(data.get("data", []))}
+
+
+@app.get("/debug/menu-dishes")
+def debug_menu_dishes():
+    from collector import collect_menu_dishes
+    df = collect_menu_dishes()
+    return {
+        "total_menus_com_pratos": len(df),
+        "sample": df.head(3).to_dict(orient="records") if not df.empty else [],
+    }
