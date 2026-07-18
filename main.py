@@ -80,3 +80,18 @@ def debug_menu_dishes():
         "total_menus_com_pratos": len(df),
         "sample": df.head(3).to_dict(orient="records") if not df.empty else [],
     }
+
+@app.get("/debug/raw-schedules")
+def debug_raw_schedules():
+    import requests, os
+    headers = {"Authorization": f"Bearer {os.environ.get('ADMIN_API_KEY', '')}"}
+    r = requests.get(
+        "https://semdesperdicio.smartru.com.br/api/schedule/all",
+        headers=headers,
+        timeout=10,
+    )
+    return {
+        "status_code": r.status_code,
+        "response_text": r.text[:500],
+        "key_used_prefix": os.environ.get('ADMIN_API_KEY', '')[:10] + "...",
+    }
