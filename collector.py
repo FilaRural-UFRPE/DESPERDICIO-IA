@@ -11,6 +11,8 @@ def _headers():
     return {
         "Authorization": f"Bearer {ADMIN_API_KEY}",
         "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
     }
 
 def _get(endpoint: str, params: dict = None) -> dict:
@@ -97,7 +99,6 @@ def collect_menu_dishes() -> pd.DataFrame:
 
         with conn:
             with conn.cursor() as cur:
-                # Verifica se o campo dishes existe
                 cur.execute("""
                     SELECT column_name 
                     FROM information_schema.columns 
@@ -128,7 +129,6 @@ def collect_menu_dishes() -> pd.DataFrame:
             if not dishes:
                 continue
 
-            # Extrai features dos pratos
             lunch = dishes.get("lunch", {})
             dinner = dishes.get("dinner", {})
 
@@ -141,7 +141,6 @@ def collect_menu_dishes() -> pd.DataFrame:
             records.append({
                 "menu_id":              row["id"],
                 "menu_date":            str(row["menu_date"]),
-                # Features do almoço
                 "lunch_has_chicken":    _has_keyword(lunch_dishes, ["frango", "chicken", "galinha"]),
                 "lunch_has_beef":       _has_keyword(lunch_dishes, ["carne", "beef", "boi", "picanha", "alcatra"]),
                 "lunch_has_fish":       _has_keyword(lunch_dishes, ["peixe", "fish", "tilápia", "atum", "salmão"]),
@@ -149,7 +148,6 @@ def collect_menu_dishes() -> pd.DataFrame:
                 "lunch_num_options":    _count_options(lunch_dishes),
                 "lunch_has_select":     bool(lunch_tipos.get("select")),
                 "lunch_has_leve_sabor": bool(lunch_tipos.get("leve_sabor")),
-                # Features do jantar
                 "dinner_has_chicken":    _has_keyword(dinner_dishes, ["frango", "chicken", "galinha"]),
                 "dinner_has_beef":       _has_keyword(dinner_dishes, ["carne", "beef", "boi"]),
                 "dinner_has_fish":       _has_keyword(dinner_dishes, ["peixe", "fish", "tilápia"]),
@@ -167,7 +165,6 @@ def collect_menu_dishes() -> pd.DataFrame:
 
 
 def _has_keyword(dishes: dict, keywords: list) -> int:
-    """Verifica se algum prato contém uma das palavras-chave."""
     if not dishes:
         return 0
     all_items = []
@@ -178,14 +175,12 @@ def _has_keyword(dishes: dict, keywords: list) -> int:
 
 
 def _count_options(dishes: dict) -> int:
-    """Conta o número total de pratos disponíveis."""
     if not dishes:
         return 0
     return sum(len(v) for v in dishes.values() if isinstance(v, list))
 
 
 def check_api_connection() -> bool:
-    """Verifica se a API do SmartRU está acessível."""
     try:
         res = requests.get(
             f"{SMARTRU_API_URL}/schedule/all",
