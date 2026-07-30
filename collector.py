@@ -52,6 +52,7 @@ def collect_schedules() -> pd.DataFrame:
             "status":         s.get("status", "AGENDADO"),
             "meal_option":    s.get("meal_option") or s.get("meal_type", "essencial"),
             "created_at":     s.get("created_at"),
+            "academic_unit":  s.get("academic_unit", "sede"),
             "is_noshow":      1 if s.get("status") in ("CANCELADO", "AGENDADO") else 0,
         })
 
@@ -81,7 +82,7 @@ def collect_daily_demand() -> pd.DataFrame:
 def collect_menu_dishes() -> pd.DataFrame:
     """
     Recolhe os pratos extraídos do cardápio pelo Menu Analyzer.
-    Depende do campo dishes JSONB na tabela menu.
+    A tabela no banco chama-se 'menus' (plural).
     Retorna DataFrame vazio se o campo não existir ainda.
     """
     try:
@@ -102,10 +103,10 @@ def collect_menu_dishes() -> pd.DataFrame:
                 cur.execute("""
                     SELECT column_name 
                     FROM information_schema.columns 
-                    WHERE table_name = 'menu' AND column_name = 'dishes'
+                    WHERE table_name = 'menus' AND column_name = 'dishes'
                 """)
                 if not cur.fetchone():
-                    logger.warning("collect_menu_dishes: campo dishes ainda não existe na tabela menu.")
+                    logger.warning("collect_menu_dishes: campo dishes ainda não existe na tabela menus.")
                     return pd.DataFrame()
 
                 cur.execute("""
@@ -113,7 +114,7 @@ def collect_menu_dishes() -> pd.DataFrame:
                         id,
                         uploaded_at::date AS menu_date,
                         dishes
-                    FROM menu
+                    FROM menus
                     WHERE dishes IS NOT NULL
                     ORDER BY uploaded_at DESC
                 """)
